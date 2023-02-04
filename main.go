@@ -10,22 +10,64 @@ import (
 	"os"
 
 	"github.com/PullRequestInc/go-gpt3"
-	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
+
 	"github.com/joho/godotenv"
 )
 
+var upgrader = websocket.Upgrader{}
+
 func main() {
 	godotenv.Load()
-	r := mux.NewRouter()
-	r.HandleFunc("/ask", AskQuestion).Methods("POST")
-	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		res, _ := json.Marshal("Hello world")
-		w.Write(res)
+	http.HandleFunc("/todo", func(w http.ResponseWriter, r *http.Request) {
+		upgrader.CheckOrigin = func(r *http.Request) bool { return true }
+		// Upgrade upgrades the HTTP server connection to the WebSocket protocol.
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Print("upgrade failed: ", err)
+			return
+		}
+		defer conn.Close()
+
+		// Continuosly read and write message
+		for {
+			mt, output, err := conn.ReadMessage()
+			questionActual := string(output)
+			// ->
+			apiKey := os.Getenv("API_KEY")
+			if apiKey == "" {
+				log.Fatalln("Api Key is missing")
+			}
+			ctx := context.Background()
+			client := gpt3.NewClient(apiKey)
+			question := &Question{}
+			question.Question = questionActual
+			fmt.Println(questionActual)
+			client.CompletionStreamWithEngine(ctx, gpt3.TextDavinci003Engine, gpt3.CompletionRequest{
+				Prompt: []string{
+					question.Question,
+				},
+				MaxTokens:   gpt3.IntPtr(3000),
+				Temperature: gpt3.Float32Ptr(0),
+			}, func(resp *gpt3.CompletionResponse) {
+				message := []byte(string(resp.Choices[0].Text))
+				fmt.Println(string(resp.Choices[0].Text))
+				err = conn.WriteMessage(mt, message)
+				if err != nil {
+					log.Println("write failed:", err)
+					return
+				}
+			})
+			err = conn.WriteMessage(mt, []byte(string("END")))
+			if err != nil {
+				log.Println("write failed:", err)
+				return
+			}
+		}
 	})
-	fmt.Print("IT is running actually")
-	log.Fatal(http.ListenAndServe(":8080", r))
+
+	fmt.Println("Server has started")
+	http.ListenAndServe(":8080", nil)
 }
 
 type Question struct {
@@ -34,42 +76,6 @@ type Question struct {
 
 type Answer struct {
 	Answer string `json:"answer"`
-}
-
-func AskQuestion(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	apiKey := os.Getenv("API_KEY")
-	if apiKey == "" {
-		log.Fatalln("Api Key is missing")
-	}
-	ctx := context.Background()
-	client := gpt3.NewClient(apiKey)
-	question := &Question{}
-	ParseBody(r, question)
-	answer := &Answer{Answer: ""}
-	err := client.CompletionStreamWithEngine(ctx, gpt3.TextDavinci003Engine, gpt3.CompletionRequest{
-		Prompt: []string{
-			question.Question,
-		},
-		MaxTokens:   gpt3.IntPtr(3000),
-		Temperature: gpt3.Float32Ptr(0),
-	}, func(resp *gpt3.CompletionResponse) {
-		answer.Answer += resp.Choices[0].Text
-		//fmt.Print(resp.Choices[0].Text)
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	res, _ := json.Marshal(answer)
-	w.WriteHeader(http.StatusOK)
-	w.Write(res)
-	fmt.Printf("\n")
-	//GetResponse(client, ctx, question)
-
-}
-
-func GetResponse(client gpt3.Client, ctx context.Context, question string) {
-
 }
 
 func ParseBody(r *http.Request, x interface{}) {
